@@ -30,9 +30,9 @@ s3_to_iceberg:
       # Custom variables for development
       vars:
         environment: development
-        s3_source_bucket: 's3://dev-raw-data/'
-        destination_s3_bucket_iceberg: 's3://dev-iceberg-warehouse/'
-        dlq_s3_bucket: 's3://dev-iceberg-dlq/'
+        s3_source_bucket: 's3://dev-raw-data-testing/dev-source-raw/'
+        destination_s3_bucket_iceberg: 's3://dev-raw-data-testing/dev-iceberg-warehouse/'
+        dlq_s3_bucket: 's3://dev-raw-data-testing/dev-iceberg-dlq/'
 
     # Staging environment - uses staging S3 buckets
     staging:
@@ -44,7 +44,7 @@ s3_to_iceberg:
 
       # Custom variables for staging
       vars:
-        environment: staging
+        environment: development
         s3_source_bucket: 's3://staging-raw-data/'
         destination_s3_bucket_iceberg: 's3://staging-iceberg-warehouse/'
         dlq_s3_bucket: 's3://staging-iceberg-dlq/'
