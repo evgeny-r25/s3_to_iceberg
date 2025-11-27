@@ -1,0 +1,11 @@
+packages:
+  - name: dbt_utils
+    package: dbt-labs/dbt_utils
+    version: 1.1.1
+  - name: dbt_expectations
+    package: metaplane/dbt_expectations
+    version: 0.9.0
+  - name: dbt_date
+    package: calogica/dbt_date
+    version: 0.8.1
+sha1_hash: aa385e45050c80a503679335eaa6c52343859ad4

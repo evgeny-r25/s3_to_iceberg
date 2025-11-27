@@ -1,50 +1,39 @@
 #!/usr/bin/env python3
 """
-GCS to S3 to Iceberg ETL Pipeline using DuckDB.
+S3 to Iceberg ETL Pipeline using DuckDB.
 
 This module implements a data pipeline that:
-1. Copies compressed CSV files from Google Cloud Storage to Amazon S3
-2. Reads and transforms the data using DuckDB
+1. Discovers and reads compressed CSV files from S3 source bucket
+2. Transforms the data using DuckDB
 3. Writes the processed data to Iceberg tables (via Parquet with partitioning)
 
-Replaces the original PySpark implementation with DuckDB for improved performance
-and simpler deployment.
+Uses DuckDB to directly read from S3, eliminating the need for GCS or intermediate storage.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Any
 
 import boto3
 import duckdb
-import pandera as pa
 import typer
-from botocore.config import Config as BotoConfig
-from botocore.exceptions import ClientError
-from google.cloud import storage
 from loguru import logger
-from pandera import Column, DataFrameSchema
-from pandera.typing import Series
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
-GCS_BUCKET_NAME = "gd-adjust-export"
-S3_BUCKET_NAME = "com.gd-mt-prod.dp.adjust-events"
-S3_FOLDER_PATH = "raw-data"
-S3_OUTPUT_PATH = "processed-data"
-ICEBERG_DATABASE = "celerdata"
+S3_SOURCE_BUCKET = "dev-raw-data-testing"
+S3_SOURCE_PREFIX = "dev-source-raw"
+S3_BUCKET_NAME = "dev-raw-data-testing"
+S3_OUTPUT_PATH = "dev-iceberg-warehouse"
+ICEBERG_DATABASE = "default"
 
 PREFIXES = [
     "1ietrnrp8xq8", "ko69zatkf75s", "o6kt928c8bgg", "6gof07xh2cg0", "quvh143djuv4",
@@ -268,188 +257,68 @@ class JobMetrics:
 class ETLConfig:
     """Configuration for the ETL pipeline."""
 
-    date: str
-    hour: str | None
-    gcs_bucket: str = GCS_BUCKET_NAME
+    s3_source_bucket: str = S3_SOURCE_BUCKET
+    s3_source_prefix: str = S3_SOURCE_PREFIX
     s3_bucket: str = S3_BUCKET_NAME
-    s3_folder_path: str = S3_FOLDER_PATH
     s3_output_path: str = S3_OUTPUT_PATH
     iceberg_database: str = ICEBERG_DATABASE
     prefixes: list[str] = field(default_factory=lambda: PREFIXES.copy())
     max_workers: int = 32
     dry_run: bool = False
-    gcs_credentials_path: str = "gcs_key.json"
 
 
 # ============================================================================
-# GCS to S3 Copy Functions
+# S3 File Discovery Functions
 # ============================================================================
 
-class GCSToS3Copier:
-    """Handles copying files from GCS to S3."""
-
-    def __init__(self, config: ETLConfig, gcs_credentials: dict[str, Any] | None = None):
-        self.config = config
-        self.gcs_credentials = gcs_credentials
-        self._init_clients()
-
-    def _init_clients(self) -> None:
-        """Initialize GCS and S3 clients."""
-        if self.gcs_credentials:
-            self.gcs_client = storage.Client.from_service_account_info(self.gcs_credentials)
-        else:
-            self.gcs_client = storage.Client()
-
-        self.gcs_bucket = self.gcs_client.bucket(self.config.gcs_bucket)
-
-        self.s3_client = boto3.client(
-            "s3",
-            config=BotoConfig(
-                max_pool_connections=50,
-                retries={"max_attempts": 3, "mode": "adaptive"},
-            ),
-        )
-
-    def copy_prefix(self, prefix: str) -> list[str]:
-        """Copy all matching files for a given prefix from GCS to S3."""
-        copied_files = []
-
-        if self.config.hour:
-            gcs_prefix_path = f"{prefix}_{self.config.date}T{self.config.hour}"
-        else:
-            gcs_prefix_path = f"{prefix}_{self.config.date}T"
-
-        try:
-            blobs = list(self.gcs_bucket.list_blobs(prefix=gcs_prefix_path))
-            csv_gz_blobs = [b for b in blobs if b.name.endswith(".csv.gz")]
-
-            for blob in csv_gz_blobs:
-                s3_key = f"{self.config.s3_folder_path}/{self.config.date}/{prefix}/{blob.name}"
-
-                try:
-                    if self.config.dry_run:
-                        logger.debug(f"[DRY-RUN] Would copy {blob.name} to s3://{self.config.s3_bucket}/{s3_key}")
-                        copied_files.append(s3_key)
-                        continue
-
-                    # Use streaming for large files (>5MB)
-                    if blob.size and blob.size > 5 * 1024 * 1024:
-                        buffer = BytesIO()
-                        blob.download_to_file(buffer, raw_download=True)
-                        buffer.seek(0)
-                        self.s3_client.upload_fileobj(buffer, self.config.s3_bucket, s3_key)
-                        buffer.close()
-                    else:
-                        gcs_data = blob.download_as_bytes(raw_download=True)
-                        self.s3_client.put_object(
-                            Bucket=self.config.s3_bucket,
-                            Key=s3_key,
-                            Body=gcs_data,
-                        )
-
-                    copied_files.append(s3_key)
-                    logger.debug(f"Copied {blob.name} to s3://{self.config.s3_bucket}/{s3_key}")
-
-                except ClientError as e:
-                    logger.error(f"Error uploading {blob.name} to S3: {e}")
-
-            if csv_gz_blobs:
-                logger.info(f"Copied {len(csv_gz_blobs)} files for prefix {prefix}")
-
-        except Exception as e:
-            logger.error(f"Error processing prefix {prefix}: {e}")
-
-        return copied_files
-
-    def copy_all_prefixes(self) -> list[str]:
-        """Copy files for all prefixes using parallel execution."""
-        all_copied_files: list[str] = []
-        max_workers = min(self.config.max_workers, len(self.config.prefixes))
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_prefix = {
-                executor.submit(self.copy_prefix, prefix): prefix
-                for prefix in self.config.prefixes
-            }
-
-            for future in as_completed(future_to_prefix):
-                prefix = future_to_prefix[future]
-                try:
-                    copied = future.result()
-                    all_copied_files.extend(copied)
-                except Exception as e:
-                    logger.error(f"Exception processing prefix {prefix}: {e}")
-
-        return all_copied_files
-
-
-# ============================================================================
-# S3 Path Resolution
-# ============================================================================
-
-class S3PathResolver:
-    """Resolves and validates S3 paths for data files."""
+class S3FileDiscovery:
+    """Discovers compressed CSV files in S3 using glob patterns."""
 
     def __init__(self, config: ETLConfig):
         self.config = config
-        self.s3_client = boto3.client("s3")
+        self.conn = duckdb.connect(":memory:")
+        self._setup_extensions()
+        self._setup_s3_credentials()
 
-    def resolve_paths_for_prefix(self, prefix: str) -> tuple[list[str], str | None]:
-        """Resolve S3 paths for a single prefix."""
-        if self.config.hour:
-            file_prefix_path = f"{prefix}_{self.config.date}T{self.config.hour}"
-        else:
-            file_prefix_path = f"{prefix}_{self.config.date}T"
+    def _setup_extensions(self) -> None:
+        """Install and load required DuckDB extensions."""
+        extensions = ["httpfs", "aws"]
+        for ext in extensions:
+            self.conn.execute(f"INSTALL {ext}")
+            self.conn.execute(f"LOAD {ext}")
+        logger.debug("DuckDB extensions loaded")
 
-        search_prefix = (
-            f"{self.config.s3_folder_path}/{self.config.date}/{prefix}/{file_prefix_path}"
-        )
+    def _setup_s3_credentials(self) -> None:
+        """Configure S3 credentials using AWS credential chain."""
+        self.conn.execute("""
+            CREATE SECRET IF NOT EXISTS s3_secret (
+                TYPE s3,
+                PROVIDER credential_chain
+            )
+        """)
+        logger.debug("S3 credentials configured")
+
+    def discover_files(self) -> list[str]:
+        """Discover all CSV.gz files in S3 source bucket using glob pattern."""
+        s3_path = f"s3://{self.config.s3_source_bucket}/{self.config.s3_source_prefix}/*.csv.gz"
 
         try:
-            response = self.s3_client.list_objects_v2(
-                Bucket=self.config.s3_bucket,
-                Prefix=search_prefix,
-            )
+            # Use glob to find all matching files
+            result = self.conn.execute(f"""
+                SELECT * FROM glob('{s3_path}')
+            """).fetchall()
 
-            matched_paths = []
-            if "Contents" in response:
-                matched_paths = [
-                    f"s3://{self.config.s3_bucket}/{obj['Key']}"
-                    for obj in response["Contents"]
-                    if obj["Key"].endswith(".csv.gz")
-                ]
+            files = [row[0] for row in result]
+            logger.info(f"Discovered {len(files)} CSV.gz files in {s3_path}")
+            return files
 
-            if matched_paths:
-                return matched_paths, None
-            return [], f"s3://{self.config.s3_bucket}/{search_prefix}*.csv.gz"
+        except Exception as e:
+            logger.error(f"Error discovering files in {s3_path}: {e}")
+            return []
 
-        except ClientError as e:
-            logger.error(f"Error listing S3 objects for prefix {prefix}: {e}")
-            return [], f"s3://{self.config.s3_bucket}/{search_prefix}*.csv.gz"
-
-    def resolve_all_paths(self) -> tuple[list[str], list[str]]:
-        """Resolve S3 paths for all prefixes using parallel execution."""
-        existing_paths: list[str] = []
-        missing_patterns: list[str] = []
-        max_workers = min(self.config.max_workers, len(self.config.prefixes))
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_prefix = {
-                executor.submit(self.resolve_paths_for_prefix, prefix): prefix
-                for prefix in self.config.prefixes
-            }
-
-            for future in as_completed(future_to_prefix):
-                prefix = future_to_prefix[future]
-                try:
-                    paths, missing = future.result()
-                    existing_paths.extend(paths)
-                    if missing:
-                        missing_patterns.append(missing)
-                except Exception as e:
-                    logger.error(f"Exception resolving paths for prefix {prefix}: {e}")
-
-        return existing_paths, missing_patterns
+    def close(self) -> None:
+        """Close the DuckDB connection."""
+        self.conn.close()
 
 
 # ============================================================================
@@ -749,44 +618,32 @@ class ETLPipeline:
     def __init__(self, config: ETLConfig):
         self.config = config
         self.metrics = JobMetrics()
-        self.gcs_credentials = self._load_gcs_credentials()
-
-    def _load_gcs_credentials(self) -> dict[str, Any] | None:
-        """Load GCS service account credentials if available."""
-        if os.path.exists(self.config.gcs_credentials_path):
-            with open(self.config.gcs_credentials_path, encoding="utf-8") as f:
-                return json.load(f)
-        return None
 
     def run(self) -> JobMetrics:
         """Execute the complete ETL pipeline."""
-        logger.info("Starting GCS to S3 to Iceberg ETL Pipeline")
-        logger.info(f"Date: {self.config.date}, Hour: {self.config.hour or 'all'}")
-        logger.info(f"Processing {len(self.config.prefixes)} prefixes")
+        logger.info("Starting S3 to Iceberg ETL Pipeline")
+        logger.info(f"Processing files from S3: s3://{self.config.s3_source_bucket}/{self.config.s3_source_prefix}")
 
         current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         try:
-            # Phase 1: Copy from GCS to S3
-            self._run_phase1_copy()
-
-            # Phase 2: Resolve S3 paths
-            s3_paths = self._run_phase2_resolve_paths()
+            # Phase 1: Discover CSV.gz files from S3
+            s3_paths = self._run_phase1_discover_files()
             if not s3_paths:
                 logger.warning("No source files found. Exiting.")
                 return self.metrics
 
-            # Phase 3: Load data into DuckDB
-            processor = self._run_phase3_load_data(s3_paths)
+            # Phase 2: Load data into DuckDB
+            processor = self._run_phase2_load_data(s3_paths)
 
-            # Phase 4: Process/transform data
-            self._run_phase4_process_data(processor, current_time)
+            # Phase 3: Process/transform data
+            self._run_phase3_process_data(processor, current_time)
 
-            # Phase 5: Write partitioned tables
-            self._run_phase5_write_partitioned(processor)
+            # Phase 4: Write partitioned tables
+            self._run_phase4_write_partitioned(processor)
 
-            # Phase 6: Write aggregates
-            self._run_phase6_write_aggregates(processor, current_time)
+            # Phase 5: Write aggregates
+            self._run_phase5_write_aggregates(processor, current_time)
 
             processor.close()
 
@@ -797,64 +654,49 @@ class ETLPipeline:
         self.metrics.log_summary()
         return self.metrics
 
-    def _run_phase1_copy(self) -> None:
-        """Phase 1: Copy files from GCS to S3."""
-        logger.info("PHASE 1: Copying files from GCS to S3")
+    def _run_phase1_discover_files(self) -> list[str]:
+        """Phase 1: Discover CSV.gz files from S3 source bucket."""
+        logger.info("PHASE 1: Discovering CSV.gz files from S3")
         start = time.perf_counter()
 
-        copier = GCSToS3Copier(self.config, self.gcs_credentials)
-        copied_files = copier.copy_all_prefixes()
-        self.metrics.files_copied = len(copied_files)
+        discoverer = S3FileDiscovery(self.config)
+        s3_paths = discoverer.discover_files()
+        discoverer.close()
 
         duration = time.perf_counter() - start
-        self.metrics.phase_timings["Phase 1 - GCS to S3 Copy"] = duration
-        logger.info(f"PHASE 1 completed: {len(copied_files)} files in {duration:.2f}s")
-
-    def _run_phase2_resolve_paths(self) -> list[str]:
-        """Phase 2: Resolve S3 paths."""
-        logger.info("PHASE 2: Resolving S3 paths")
-        start = time.perf_counter()
-
-        resolver = S3PathResolver(self.config)
-        s3_paths, missing = resolver.resolve_all_paths()
-
-        for pattern in missing:
-            logger.debug(f"No files found for pattern: {pattern}")
-
-        duration = time.perf_counter() - start
-        self.metrics.phase_timings["Phase 2 - S3 Path Resolution"] = duration
-        logger.info(f"PHASE 2 completed: {len(s3_paths)} paths in {duration:.2f}s")
+        self.metrics.phase_timings["Phase 1 - File Discovery"] = duration
+        logger.info(f"PHASE 1 completed: {len(s3_paths)} files discovered in {duration:.2f}s")
 
         return s3_paths
 
-    def _run_phase3_load_data(self, s3_paths: list[str]) -> DuckDBProcessor:
-        """Phase 3: Load data into DuckDB."""
-        logger.info("PHASE 3: Loading data into DuckDB")
+    def _run_phase2_load_data(self, s3_paths: list[str]) -> DuckDBProcessor:
+        """Phase 2: Load data into DuckDB."""
+        logger.info("PHASE 2: Loading data into DuckDB")
         start = time.perf_counter()
 
         processor = DuckDBProcessor(self.config)
         self.metrics.rows_read = processor.load_csv_files(s3_paths)
 
         duration = time.perf_counter() - start
-        self.metrics.phase_timings["Phase 3 - Data Loading"] = duration
-        logger.info(f"PHASE 3 completed: {self.metrics.rows_read:,} rows in {duration:.2f}s")
+        self.metrics.phase_timings["Phase 2 - Data Loading"] = duration
+        logger.info(f"PHASE 2 completed: {self.metrics.rows_read:,} rows in {duration:.2f}s")
 
         return processor
 
-    def _run_phase4_process_data(self, processor: DuckDBProcessor, current_time: str) -> None:
-        """Phase 4: Process and transform data."""
-        logger.info("PHASE 4: Processing data")
+    def _run_phase3_process_data(self, processor: DuckDBProcessor, current_time: str) -> None:
+        """Phase 3: Process and transform data."""
+        logger.info("PHASE 3: Processing data")
         start = time.perf_counter()
 
         processor.process_dataframe(current_time)
 
         duration = time.perf_counter() - start
-        self.metrics.phase_timings["Phase 4 - Data Processing"] = duration
-        logger.info(f"PHASE 4 completed in {duration:.2f}s")
+        self.metrics.phase_timings["Phase 3 - Data Processing"] = duration
+        logger.info(f"PHASE 3 completed in {duration:.2f}s")
 
-    def _run_phase5_write_partitioned(self, processor: DuckDBProcessor) -> None:
-        """Phase 5: Write partitioned tables."""
-        logger.info("PHASE 5: Writing partitioned tables")
+    def _run_phase4_write_partitioned(self, processor: DuckDBProcessor) -> None:
+        """Phase 4: Write partitioned tables."""
+        logger.info("PHASE 4: Writing partitioned tables")
         start = time.perf_counter()
 
         prefixes = processor.get_distinct_prefixes()
@@ -880,16 +722,16 @@ class ETLPipeline:
                     self.metrics.failed_tables.append(table_name)
 
         duration = time.perf_counter() - start
-        self.metrics.phase_timings["Phase 5 - Partitioned Tables"] = duration
+        self.metrics.phase_timings["Phase 4 - Partitioned Tables"] = duration
         logger.info(
-            f"PHASE 5 completed: {self.metrics.partitioned_rows_written:,} rows in {duration:.2f}s"
+            f"PHASE 4 completed: {self.metrics.partitioned_rows_written:,} rows in {duration:.2f}s"
         )
 
-    def _run_phase6_write_aggregates(
+    def _run_phase5_write_aggregates(
         self, processor: DuckDBProcessor, current_time: str
     ) -> None:
-        """Phase 6: Write aggregate tables."""
-        logger.info("PHASE 6: Writing aggregate tables")
+        """Phase 5: Write aggregate tables."""
+        logger.info("PHASE 5: Writing aggregate tables")
         start = time.perf_counter()
 
         rows, failed = processor.write_ad_impression_aggregates(current_time)
@@ -897,8 +739,8 @@ class ETLPipeline:
         self.metrics.failed_tables.extend(failed)
 
         duration = time.perf_counter() - start
-        self.metrics.phase_timings["Phase 6 - Aggregates"] = duration
-        logger.info(f"PHASE 6 completed: {rows:,} rows in {duration:.2f}s")
+        self.metrics.phase_timings["Phase 5 - Aggregates"] = duration
+        logger.info(f"PHASE 5 completed: {rows:,} rows in {duration:.2f}s")
 
 
 # ============================================================================
@@ -906,63 +748,42 @@ class ETLPipeline:
 # ============================================================================
 
 app = typer.Typer(
-    name="gcs-to-s3-etl",
-    help="ETL Pipeline: GCS → S3 → Iceberg (DuckDB)",
+    name="s3-to-iceberg-etl",
+    help="ETL Pipeline: S3 → Iceberg (DuckDB)",
     add_completion=False,
 )
 
 
 @app.command()
 def run(
-    date: Annotated[
+    s3_source_bucket: Annotated[
         str,
         typer.Option(
-            "--date", "-d",
-            help="Date to process (YYYY-MM-DD format)",
+            "--s3-source-bucket",
+            help="S3 source bucket name containing CSV.gz files",
         ),
-    ],
-    hour: Annotated[
-        str | None,
-        typer.Option(
-            "--hour", "-h",
-            help="Hour to process (HHMM format). If not provided, processes all hours.",
-        ),
-    ] = None,
-    prefixes: Annotated[
-        str | None,
-        typer.Option(
-            "--prefixes", "-p",
-            help="Comma-separated list of prefixes to process. Defaults to all.",
-        ),
-    ] = None,
-    gcs_bucket: Annotated[
+    ] = S3_SOURCE_BUCKET,
+    s3_source_prefix: Annotated[
         str,
         typer.Option(
-            "--gcs-bucket",
-            help="GCS source bucket name",
+            "--s3-source-prefix",
+            help="S3 prefix path for source CSV.gz files",
         ),
-    ] = GCS_BUCKET_NAME,
+    ] = S3_SOURCE_PREFIX,
     s3_bucket: Annotated[
         str,
         typer.Option(
             "--s3-bucket",
-            help="S3 destination bucket name",
+            help="S3 destination bucket name for output",
         ),
     ] = S3_BUCKET_NAME,
-    max_workers: Annotated[
-        int,
-        typer.Option(
-            "--max-workers", "-w",
-            help="Maximum number of parallel workers",
-        ),
-    ] = 32,
-    gcs_credentials: Annotated[
+    s3_output_path: Annotated[
         str,
         typer.Option(
-            "--gcs-credentials",
-            help="Path to GCS service account JSON file",
+            "--s3-output-path",
+            help="S3 path for output parquet files",
         ),
-    ] = "gcs_key.json",
+    ] = S3_OUTPUT_PATH,
     verbose: Annotated[
         bool,
         typer.Option(
@@ -977,36 +798,20 @@ def run(
             help="Path to log file",
         ),
     ] = None,
-    dry_run: Annotated[
-        bool,
-        typer.Option(
-            "--dry-run",
-            help="Simulate operations without making changes",
-        ),
-    ] = False,
 ) -> None:
     """
-    Run the GCS to S3 to Iceberg ETL pipeline.
+    Run the S3 to Iceberg ETL pipeline.
 
-    This pipeline copies data from Google Cloud Storage to Amazon S3,
-    transforms it using DuckDB, and writes it as partitioned Parquet files.
+    This pipeline discovers CSV.gz files in S3, transforms them using DuckDB,
+    and writes the results as partitioned Parquet files.
     """
     configure_logging(verbose=verbose, log_file=log_file)
 
-    # Parse prefixes if provided
-    prefix_list = PREFIXES.copy()
-    if prefixes:
-        prefix_list = [p.strip() for p in prefixes.split(",")]
-
     config = ETLConfig(
-        date=date,
-        hour=hour,
-        gcs_bucket=gcs_bucket,
+        s3_source_bucket=s3_source_bucket,
+        s3_source_prefix=s3_source_prefix,
         s3_bucket=s3_bucket,
-        prefixes=prefix_list,
-        max_workers=max_workers,
-        dry_run=dry_run,
-        gcs_credentials_path=gcs_credentials,
+        s3_output_path=s3_output_path,
     )
 
     pipeline = ETLPipeline(config)
@@ -1038,26 +843,42 @@ def list_events() -> None:
 
 
 @app.command()
-def validate_config() -> None:
+def validate_config(
+    s3_source_bucket: Annotated[
+        str,
+        typer.Option(
+            "--s3-source-bucket",
+            help="S3 source bucket name",
+        ),
+    ] = S3_SOURCE_BUCKET,
+    s3_bucket: Annotated[
+        str,
+        typer.Option(
+            "--s3-bucket",
+            help="S3 destination bucket name",
+        ),
+    ] = S3_BUCKET_NAME,
+) -> None:
     """Validate the configuration and check connectivity."""
     configure_logging(verbose=True)
 
     logger.info("Validating configuration...")
 
-    # Check GCS credentials
-    gcs_creds_path = Path("gcs_key.json")
-    if gcs_creds_path.exists():
-        logger.info("✓ GCS credentials file found")
-    else:
-        logger.warning("✗ GCS credentials file not found (will use default credentials)")
-
-    # Check S3 connectivity
+    # Check source S3 bucket connectivity
     try:
         s3 = boto3.client("s3")
-        s3.head_bucket(Bucket=S3_BUCKET_NAME)
-        logger.info(f"✓ S3 bucket '{S3_BUCKET_NAME}' is accessible")
+        s3.head_bucket(Bucket=s3_source_bucket)
+        logger.info(f"✓ S3 source bucket '{s3_source_bucket}' is accessible")
     except Exception as e:
-        logger.error(f"✗ S3 bucket check failed: {e}")
+        logger.error(f"✗ S3 source bucket check failed: {e}")
+
+    # Check destination S3 bucket connectivity
+    try:
+        s3 = boto3.client("s3")
+        s3.head_bucket(Bucket=s3_bucket)
+        logger.info(f"✓ S3 destination bucket '{s3_bucket}' is accessible")
+    except Exception as e:
+        logger.error(f"✗ S3 destination bucket check failed: {e}")
 
     # Check DuckDB
     try:

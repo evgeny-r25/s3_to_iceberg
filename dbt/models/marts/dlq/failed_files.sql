@@ -37,7 +37,7 @@ enriched_failures as (
         concat(
             '{{ var("dlq_s3_bucket") }}',
             '/',
-            format_timestamp('%Y/%m/%d', validation_timestamp),
+            strftime(validation_timestamp, '%Y/%m/%d'),
             '/',
             file_name
         ) as file_location_dlq,

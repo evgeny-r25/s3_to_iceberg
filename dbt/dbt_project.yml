@@ -13,7 +13,6 @@ profile: 's3_to_iceberg'
 model-paths: ['models']
 analysis-paths: ['analyses']
 test-paths: ['tests']
-data-paths: ['data']
 macro-paths: ['macros']
 snapshot-paths: ['snapshots']
 target-path: 'target'
@@ -62,7 +61,7 @@ vars:
   validation_enabled: true
 
   # Environment-specific settings (overridden per environment)
-  environment: "{{ env_var('DBT_ENV', 'development') }}"
+  environment: development
 
 # Configurations for different environments via targets
 # This will be expanded in profiles.yml for production/development/staging

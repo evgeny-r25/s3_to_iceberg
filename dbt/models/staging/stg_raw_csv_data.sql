@@ -26,7 +26,7 @@ with raw_data as (
             else true
         end as is_valid_content
     from {{ source('s3_raw', 'csv_data') }}
-    where load_timestamp >= dateadd('day', -7, current_date)  -- Keep 7 days of data
+    where load_timestamp >= current_date - interval '7 days'  -- Keep 7 days of data
 )
 
 select

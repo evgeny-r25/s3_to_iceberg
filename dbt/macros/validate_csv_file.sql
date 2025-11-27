@@ -10,7 +10,7 @@
         } -%}
 
         {%- if file_content is none or file_content == '' -%}
-            {%- set _ = validation_result['is_valid'] = false -%}
+            {%- set _ = validation_result.update({'is_valid': false}) -%}
             {%- set _ = validation_result['errors'].append('File content is empty') -%}
         {%- endif -%}
 
@@ -20,12 +20,12 @@
         {%- endif -%}
 
         {%- if ',' not in file_content -%}
-            {%- set _ = validation_result['is_valid'] = false -%}
+            {%- set _ = validation_result.update({'is_valid': false}) -%}
             {%- set _ = validation_result['errors'].append('File does not appear to be valid CSV format (no commas found)') -%}
         {%- endif -%}
 
         {%- if file_name is none or file_name == '' -%}
-            {%- set _ = validation_result['is_valid'] = false -%}
+            {%- set _ = validation_result.update({'is_valid': false}) -%}
             {%- set _ = validation_result['errors'].append('File name is missing') -%}
         {%- endif -%}
 

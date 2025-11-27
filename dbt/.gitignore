@@ -32,3 +32,4 @@ build/
 # DuckDB
 *.duckdb
 *.duckdb.wal
+dbt_internal_packages/

@@ -3,7 +3,6 @@ version: 2
 sources:
   - name: s3_raw
     description: Raw CSV files ingested from S3 every hour by gcs_to_s3_to_iceberg.py
-    database: "{{ var('environment') }}"
     schema: raw
     tables:
       - name: csv_data
@@ -24,7 +23,6 @@ sources:
 
   - name: s3_validated
     description: Validated and processed data loaded to Iceberg
-    database: "{{ var('environment') }}"
     schema: marts
     tables:
       - name: processed_data
@@ -36,7 +34,6 @@ sources:
 
   - name: s3_dlq
     description: Dead Letter Queue - broken or invalid files
-    database: "{{ var('environment') }}"
     schema: dlq
     tables:
       - name: failed_files
