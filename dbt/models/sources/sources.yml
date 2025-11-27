@@ -1,0 +1,56 @@
+version: 2
+
+sources:
+  - name: s3_raw
+    description: Raw CSV files ingested from S3 every hour by gcs_to_s3_to_iceberg.py
+    database: "{{ var('environment') }}"
+    schema: raw
+    tables:
+      - name: csv_data
+        description: |
+          Raw CSV data files from S3 source bucket.
+          These files are ingested hourly and validated before processing.
+        columns:
+          - name: file_name
+            description: Name of the source CSV file
+          - name: load_timestamp
+            description: Timestamp when file was loaded
+          - name: file_hash
+            description: Hash of file contents for integrity checking
+          - name: record_count
+            description: Number of records in the file
+          - name: raw_content
+            description: Raw CSV content
+
+  - name: s3_validated
+    description: Validated and processed data loaded to Iceberg
+    database: "{{ var('environment') }}"
+    schema: marts
+    tables:
+      - name: processed_data
+        description: Cleaned and validated data ready for consumption
+        freshness:
+          warn_after: { count: 2, period: hour }
+          error_after: { count: 4, period: hour }
+        loaded_at_field: load_timestamp
+
+  - name: s3_dlq
+    description: Dead Letter Queue - broken or invalid files
+    database: "{{ var('environment') }}"
+    schema: dlq
+    tables:
+      - name: failed_files
+        description: |
+          Files that failed validation or processing.
+          Moved here from source bucket for manual investigation.
+        columns:
+          - name: file_name
+            description: Name of the failed file
+          - name: failure_reason
+            description: Reason for validation/processing failure
+          - name: error_details
+            description: Detailed error message
+          - name: failed_timestamp
+            description: When the file failed processing
+          - name: file_location
+            description: S3 location of the broken file

@@ -1,0 +1,58 @@
+# profiles.yml - Database connection configurations for s3_to_iceberg project
+# Copy this file to ~/.dbt/profiles.yml and adjust credentials as needed
+
+s3_to_iceberg:
+  target: development
+  outputs:
+    # Production environment - uses production S3 buckets
+    production:
+      type: duckdb
+      path: '/tmp/prod_iceberg.duckdb'
+      schema: production
+      threads: 4
+      timeout_seconds: 300
+
+      # Custom variables for production
+      vars:
+        environment: production
+        s3_source_bucket: 's3://prod-raw-data/'
+        destination_s3_bucket_iceberg: 's3://prod-iceberg-warehouse/'
+        dlq_s3_bucket: 's3://prod-iceberg-dlq/'
+
+    # Development environment - uses dev S3 buckets
+    development:
+      type: duckdb
+      path: '/tmp/dev_iceberg.duckdb'
+      schema: development
+      threads: 2
+      timeout_seconds: 300
+
+      # Custom variables for development
+      vars:
+        environment: development
+        s3_source_bucket: 's3://dev-raw-data/'
+        destination_s3_bucket_iceberg: 's3://dev-iceberg-warehouse/'
+        dlq_s3_bucket: 's3://dev-iceberg-dlq/'
+
+    # Staging environment - uses staging S3 buckets
+    staging:
+      type: duckdb
+      path: '/tmp/staging_iceberg.duckdb'
+      schema: staging
+      threads: 3
+      timeout_seconds: 300
+
+      # Custom variables for staging
+      vars:
+        environment: staging
+        s3_source_bucket: 's3://staging-raw-data/'
+        destination_s3_bucket_iceberg: 's3://staging-iceberg-warehouse/'
+        dlq_s3_bucket: 's3://staging-iceberg-dlq/'
+
+# Notes:
+# 1. DuckDB is used as the data warehouse for local development/testing
+# 2. For production AWS deployments, consider using:
+#    - Athena adapter (native S3 + Iceberg integration)
+#    - Spark adapter (via Databricks)
+# 3. Update S3 bucket names to match your actual AWS configuration
+# 4. Ensure AWS credentials are configured in ~/.aws/credentials or environment variables

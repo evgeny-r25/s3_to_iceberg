@@ -1,0 +1,52 @@
+version: 2
+
+models:
+  - name: processed_data
+    description: |
+      Main mart table containing validated CSV data from S3.
+      Partitioned by load_date for efficient querying.
+      Data is stored in Iceberg format for ACID transactions.
+    columns:
+      - name: file_name
+        description: Name of the source CSV file
+        tests:
+          - not_null
+          - unique
+
+      - name: load_timestamp
+        description: When the file was loaded from S3
+        tests:
+          - not_null
+
+      - name: load_date
+        description: Date partition for the load
+        tests:
+          - not_null
+
+      - name: file_hash
+        description: Hash of file contents for integrity verification
+        tests:
+          - not_null
+
+      - name: record_count
+        description: Number of records in the file
+        tests:
+          - not_null
+          - assert_greater_than_zero
+
+      - name: processing_status
+        description: Current processing status of the file
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['READY_FOR_PROCESSING']
+
+      - name: inserted_at
+        description: When the record was inserted
+        tests:
+          - not_null
+
+      - name: updated_at
+        description: When the record was last updated
+        tests:
+          - not_null

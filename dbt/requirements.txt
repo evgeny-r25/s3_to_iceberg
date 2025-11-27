@@ -1,0 +1,15 @@
+# dbt project requirements
+dbt-core>=1.5.0
+dbt-duckdb>=1.7.0
+
+# Optional adapters for production
+# dbt-athena>=1.0.0  # For AWS Athena
+# dbt-spark>=1.0.0   # For Databricks/Spark
+
+# Testing and quality
+dbt-utils>=1.1.0
+dbt-expectations>=0.8.0
+
+# Development tools
+dbt-osmosis>=0.14.0  # Auto-generate YAML
+sqlfluff>=2.0.0     # SQL linting

@@ -1,0 +1,80 @@
+
+# dbt project for S3 to Iceberg data pipeline
+# Handles ingestion, validation, and loading of CSV files from S3 to Iceberg tables
+
+name: 's3_to_iceberg_dbt'
+version: '1.0.0'
+config-version: 2
+
+# Profile to use for this project
+profile: 's3_to_iceberg'
+
+# Directories configuration
+model-paths: ['models']
+analysis-paths: ['analyses']
+test-paths: ['tests']
+data-paths: ['data']
+macro-paths: ['macros']
+snapshot-paths: ['snapshots']
+target-path: 'target'
+clean-targets:
+  - 'target'
+  - 'dbt_packages'
+
+# Require version
+require-dbt-version: ['>=1.0.0']
+
+# Seeds configuration (CSV data loading)
+seeds:
+  s3_to_iceberg_dbt:
+    +schema: 'seeds'
+
+# Models configuration
+models:
+  s3_to_iceberg_dbt:
+    # Staging models - raw data from CSV files
+    staging:
+      +materialized: 'view'
+      +schema: 'stg'
+
+    # Mart models - processed and validated data
+    marts:
+      +materialized: 'table'
+      +schema: 'marts'
+      # DLQ (Dead Letter Queue) for broken files
+      dlq:
+        +materialized: 'table'
+        +schema: 'dlq'
+
+    # Source definitions
+    sources:
+      +materialized: 'view'
+
+# Variables for different environments
+vars:
+  # S3 bucket configurations
+  s3_source_bucket: "{{ env_var('S3_SOURCE_BUCKET', 's3_source_bucket') }}"
+  destination_s3_bucket_iceberg: "{{ env_var('DEST_S3_BUCKET', 'destination_s3_bucket_iceberg') }}"
+  dlq_s3_bucket: "{{ env_var('DLQ_S3_BUCKET', 's3_bucket_dlq_iceberg_broken') }}"
+
+  # Processing configurations
+  batch_size: 1000
+  validation_enabled: true
+
+  # Environment-specific settings (overridden per environment)
+  environment: "{{ env_var('DBT_ENV', 'development') }}"
+
+# Configurations for different environments via targets
+# This will be expanded in profiles.yml for production/development/staging
+
+on-run-start: |
+  {%- if execute -%}
+    {% set env = var('environment') %}
+    {% do log("Starting dbt run for environment: " ~ env, info=true) %}
+  {%- endif -%}
+
+on-run-end: |
+  {%- if execute -%}
+    {% set env = var('environment') %}
+    {% do log("Completed dbt run for environment: " ~ env, info=true) %}
+  {%- endif -%}
