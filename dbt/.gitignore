@@ -9,7 +9,7 @@ dbt_project_eval_cache.sql
 # Environment files
 .env
 .env.local
-
+.envrc
 # IDE
 .vscode/
 .idea/

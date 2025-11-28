@@ -171,52 +171,6 @@ def configure_logging(verbose: bool = False, log_file: Path | None = None) -> No
 
 
 # ============================================================================
-# Data Validation Schemas (Pandera)
-# ============================================================================
-
-class PublisherParametersSchema(pa.DataFrameModel):
-    """Schema for publisher_parameters JSON structure."""
-
-    adjust_event_name: Series[str] = pa.Field(nullable=True)
-    game: Series[str] = pa.Field(nullable=True)
-    ad_format: Series[str] = pa.Field(nullable=True)
-    ad_placement: Series[str] = pa.Field(nullable=True)
-    ad_revenue: Series[str] = pa.Field(nullable=True)
-
-
-class RawEventSchema(pa.DataFrameModel):
-    """Schema for raw event data validation."""
-
-    created_at: Series[float] = pa.Field(nullable=False, coerce=True)
-    activity_kind: Series[str] = pa.Field(
-        nullable=False,
-        isin=ALLOWED_ACTIVITY_KINDS,
-    )
-    adid: Series[str] = pa.Field(nullable=True)
-    country: Series[str] = pa.Field(nullable=True)
-
-    class Config:
-        coerce = True
-        strict = False
-
-
-def create_validation_schema() -> DataFrameSchema:
-    """Create a Pandera schema for validating raw event data."""
-    return DataFrameSchema(
-        columns={
-            "created_at": Column(nullable=False),
-            "activity_kind": Column(
-                str,
-                checks=pa.Check.isin(ALLOWED_ACTIVITY_KINDS),
-                nullable=False,
-            ),
-        },
-        coerce=True,
-        strict=False,
-    )
-
-
-# ============================================================================
 # Data Classes
 # ============================================================================
 
@@ -272,53 +226,50 @@ class ETLConfig:
 # ============================================================================
 
 class S3FileDiscovery:
-    """Discovers compressed CSV files in S3 using glob patterns."""
+    """Discovers compressed CSV files in S3 using boto3."""
 
     def __init__(self, config: ETLConfig):
         self.config = config
-        self.conn = duckdb.connect(":memory:")
-        self._setup_extensions()
-        self._setup_s3_credentials()
-
-    def _setup_extensions(self) -> None:
-        """Install and load required DuckDB extensions."""
-        extensions = ["httpfs", "aws"]
-        for ext in extensions:
-            self.conn.execute(f"INSTALL {ext}")
-            self.conn.execute(f"LOAD {ext}")
-        logger.debug("DuckDB extensions loaded")
-
-    def _setup_s3_credentials(self) -> None:
-        """Configure S3 credentials using AWS credential chain."""
-        self.conn.execute("""
-            CREATE SECRET IF NOT EXISTS s3_secret (
-                TYPE s3,
-                PROVIDER credential_chain
-            )
-        """)
-        logger.debug("S3 credentials configured")
+        self.s3_client = boto3.client('s3')
 
     def discover_files(self) -> list[str]:
-        """Discover all CSV.gz files in S3 source bucket using glob pattern."""
-        s3_path = f"s3://{self.config.s3_source_bucket}/{self.config.s3_source_prefix}/*.csv.gz"
-
+        """Discover all CSV.gz files in S3 source bucket using boto3 list_objects."""
         try:
-            # Use glob to find all matching files
-            result = self.conn.execute(f"""
-                SELECT * FROM glob('{s3_path}')
-            """).fetchall()
+            logger.debug(f"Discovering files in s3://{self.config.s3_source_bucket}/{self.config.s3_source_prefix}")
 
-            files = [row[0] for row in result]
-            logger.info(f"Discovered {len(files)} CSV.gz files in {s3_path}")
-            return files
+            # List all objects in the prefix
+            s3_files = []
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            pages = paginator.paginate(
+                Bucket=self.config.s3_source_bucket,
+                Prefix=self.config.s3_source_prefix
+            )
+
+            for page in pages:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        key = obj['Key']
+                        if key.endswith('.csv.gz'):
+                            s3_path = f"s3://{self.config.s3_source_bucket}/{key}"
+                            s3_files.append(s3_path)
+
+            logger.info(f"Discovered {len(s3_files)} CSV.gz files in s3://{self.config.s3_source_bucket}/{self.config.s3_source_prefix}")
+
+            if s3_files:
+                for f in s3_files[:5]:  # Log first 5 files
+                    logger.debug(f"Found file: {f}")
+
+            return s3_files
 
         except Exception as e:
-            logger.error(f"Error discovering files in {s3_path}: {e}")
+            logger.error(f"Error discovering files: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
             return []
 
     def close(self) -> None:
-        """Close the DuckDB connection."""
-        self.conn.close()
+        """Close resources (no-op for boto3)."""
+        pass
 
 
 # ============================================================================
@@ -340,47 +291,189 @@ class DuckDBProcessor:
         for ext in extensions:
             self.conn.execute(f"INSTALL {ext}")
             self.conn.execute(f"LOAD {ext}")
+
+        # Set S3 region
+        self.conn.execute("SET s3_region = 'eu-west-1'")
         logger.debug("DuckDB extensions loaded")
 
     def _setup_s3_credentials(self) -> None:
-        """Configure S3 credentials using AWS credential chain."""
-        self.conn.execute("""
-            CREATE SECRET IF NOT EXISTS s3_secret (
-                TYPE s3,
-                PROVIDER credential_chain
-            )
-        """)
-        logger.debug("S3 credentials configured")
+        """Configure S3 credentials using AWS environment variables or credentials."""
+        try:
+            # Try to use AWS credential chain first
+            self.conn.execute("""
+                CREATE SECRET IF NOT EXISTS s3_secret (
+                    TYPE s3,
+                    PROVIDER credential_chain
+                )
+            """)
+            logger.debug("S3 credentials configured using credential chain")
+        except Exception as e:
+            logger.debug(f"Credential chain failed: {e}, trying environment variables")
+            try:
+                # Fall back to environment variables
+                import os
+                access_key = os.getenv('AWS_ACCESS_KEY_ID')
+                secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+
+                if access_key and secret_key:
+                    self.conn.execute(f"""
+                        CREATE SECRET IF NOT EXISTS s3_secret (
+                            TYPE s3,
+                            KEY_ID '{access_key}',
+                            SECRET '{secret_key}'
+                        )
+                    """)
+                    logger.debug("S3 credentials configured using environment variables")
+                else:
+                    logger.warning("AWS credentials not found in environment variables")
+            except Exception as e2:
+                logger.error(f"Failed to configure S3 credentials: {e2}")
 
     def load_csv_files(self, s3_paths: list[str]) -> int:
-        """Load CSV files from S3 into a DuckDB table."""
+        """Load CSV files from S3 into a DuckDB table, moving failed files to DLQ."""
         if not s3_paths:
             logger.warning("No S3 paths provided for loading")
             return 0
 
-        # Create a list of paths for DuckDB
-        paths_str = ", ".join(f"'{p}'" for p in s3_paths)
+        s3_client = boto3.client('s3', region_name='eu-west-1')
+        successful_paths = []
+        failed_files = []
 
-        # Read CSV files with auto-detection
-        self.conn.execute(f"""
-            CREATE OR REPLACE TABLE raw_events AS
-            SELECT
-                *,
-                regexp_extract(filename, '([^/]+)_\\d{{4}}-\\d{{2}}-\\d{{2}}T', 1) AS prefix
-            FROM read_csv(
-                [{paths_str}],
-                header = true,
-                quote = '"',
-                escape = '"',
-                filename = true,
-                union_by_name = true,
-                ignore_errors = true
+        # Process each file individually to catch errors per file
+        for s3_path in s3_paths:
+            try:
+                logger.debug(f"Attempting to read: {s3_path}")
+
+                # Parse S3 path
+                parts = s3_path.replace("s3://", "").split("/", 1)
+                bucket = parts[0]
+                key = parts[1]
+
+                # Try to read CSV.gz file with DuckDB
+                self.conn.execute(f"""
+                    CREATE OR REPLACE TABLE temp_csv AS
+                    SELECT
+                        *,
+                        regexp_extract(filename, '([^/]+)_\\d{{4}}-\\d{{2}}-\\d{{2}}T', 1) AS prefix
+                    FROM read_csv(
+                        '{s3_path}',
+                        header = true,
+                        quote = '"',
+                        escape = '"',
+                        filename = true,
+                        union_by_name = true,
+                        ignore_errors = true
+                    )
+                """)
+
+                row_count = self.conn.execute("SELECT COUNT(*) FROM temp_csv").fetchone()[0]
+                logger.info(f"Successfully loaded {row_count:,} rows from {s3_path}")
+                successful_paths.append(s3_path)
+
+            except Exception as e:
+                logger.error(f"Failed to read {s3_path}: {e}")
+                failed_files.append((s3_path, str(e)))
+
+                # Move failed file to DLQ
+                try:
+                    self._move_file_to_dlq(s3_path, str(e))
+                except Exception as dlq_error:
+                    logger.error(f"Failed to move {s3_path} to DLQ: {dlq_error}")
+
+        # Create final table from successful files
+        if successful_paths:
+            paths_str = ", ".join(f"'{p}'" for p in successful_paths)
+
+            # Create raw table first
+            self.conn.execute(f"""
+                CREATE OR REPLACE TABLE raw_events_temp AS
+                SELECT
+                    *
+                FROM read_csv(
+                    [{paths_str}],
+                    header = true,
+                    quote = '"',
+                    escape = '"',
+                    filename = true,
+                    union_by_name = true,
+                    ignore_errors = true
+                )
+            """)
+
+            # Get all column names and create clean versions
+            columns = self.conn.execute("DESCRIBE raw_events_temp").fetchall()
+            select_clauses = []
+            for col_name, _ in columns:
+                # Remove curly braces from column names if present
+                clean_name = col_name.replace('{', '').replace('}', '')
+                if col_name != clean_name:
+                    select_clauses.append(f'"{col_name}" AS {clean_name}')
+                else:
+                    select_clauses.append(f'"{col_name}"')
+
+            # Extract filename for prefix
+            select_clauses.append("regexp_extract(filename, '([^/]+)_\\d{4}-\\d{2}-\\d{2}T', 1) AS prefix")
+
+            # Create clean final table
+            select_str = ", ".join(select_clauses)
+            self.conn.execute(f"""
+                CREATE OR REPLACE TABLE raw_events AS
+                SELECT {select_str}
+                FROM raw_events_temp
+            """)
+
+            # Drop temp table
+            self.conn.execute("DROP TABLE raw_events_temp")
+
+            row_count = self.conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0]
+            logger.info(f"Final table created with {row_count:,} rows from {len(successful_paths)} files")
+        else:
+            # Create empty table if no successful files
+            self.conn.execute("CREATE OR REPLACE TABLE raw_events AS SELECT NULL AS dummy WHERE FALSE")
+            logger.warning("No successful files to load. Created empty raw_events table")
+
+        if failed_files:
+            logger.warning(f"{len(failed_files)} files failed and were moved to DLQ")
+
+        return self.conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0]
+
+    def _move_file_to_dlq(self, s3_path: str, error_reason: str) -> None:
+        """Move a failed file to the DLQ bucket."""
+        try:
+            # Parse source S3 path
+            parts = s3_path.replace("s3://", "").split("/", 1)
+            source_bucket = parts[0]
+            source_key = parts[1]
+
+            # Get the filename from the key
+            filename = source_key.split("/")[-1]
+
+            # Destination DLQ path
+            dlq_bucket = "dev-raw-data-testing"
+            dlq_prefix = "dev-iceberg-dlq"
+            dlq_key = f"{dlq_prefix}/{filename}"
+
+            s3_client = boto3.client('s3', region_name='eu-west-1')
+
+            # Copy file to DLQ
+            copy_source = {'Bucket': source_bucket, 'Key': source_key}
+            s3_client.copy_object(CopySource=copy_source, Bucket=dlq_bucket, Key=dlq_key)
+
+            logger.info(f"Moved failed file to DLQ: s3://{dlq_bucket}/{dlq_key}")
+            logger.debug(f"Error reason: {error_reason}")
+
+            # Optional: Create a metadata file with error details
+            metadata_key = f"{dlq_prefix}/{filename}.error.txt"
+            s3_client.put_object(
+                Bucket=dlq_bucket,
+                Key=metadata_key,
+                Body=f"Error: {error_reason}\nOriginal file: {s3_path}\nTimestamp: {datetime.now(timezone.utc).isoformat()}"
             )
-        """)
+            logger.debug(f"Created error metadata file: s3://{dlq_bucket}/{metadata_key}")
 
-        row_count = self.conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0]
-        logger.info(f"Loaded {row_count:,} rows from {len(s3_paths)} files")
-        return row_count
+        except Exception as e:
+            logger.error(f"Failed to move file to DLQ: {e}")
+            raise
 
     def process_dataframe(self, current_time: str) -> None:
         """Apply transformations to the raw data."""

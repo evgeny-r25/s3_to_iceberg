@@ -13,6 +13,7 @@ help:
 	@echo "  run-dev         Run models for development"
 	@echo "  run-staging     Run models for staging"
 	@echo "  run-prod        Run models for production"
+	@echo "  run-dbt         Run dbt with arguments"
 	@echo "  compile         Compile SQL files"
 	@echo "  docs            Generate documentation"
 	@echo "  serve           Serve documentation"
@@ -32,42 +33,46 @@ deps:
 
 # Build all models
 build:
-	dbt build --profiles-dir ~/.dbt --target $(ENV)
+	dbt build --profiles-dir . --target $(ENV)
 
 # Run all models
 run:
-	dbt run --profiles-dir ~/.dbt --target $(ENV)
+	dbt run --profiles-dir . --target $(ENV)
 
 run-dev:
-	dbt run --profiles-dir ~/.dbt --target development
+	dbt run --profiles-dir . --target development
 
 run-staging:
-	dbt run --profiles-dir ~/.dbt --target staging
+	dbt run --profiles-dir . --target staging
 
 run-prod:
-	dbt run --profiles-dir ~/.dbt --target production
+	dbt run --profiles-dir . --target production
+
+# Run dbt with arguments
+run-dbt:
+	dbt $(ARGS) --profiles-dir . --target $(ENV)
 
 # Run tests
 test:
-	dbt test --profiles-dir ~/.dbt --target $(ENV)
+	dbt test --profiles-dir . --target $(ENV)
 
 test-quick:
-	dbt test --profiles-dir ~/.dbt --target $(ENV) --fail-fast
+	dbt test --profiles-dir . --target $(ENV) --fail-fast
 
 # Compile SQL
 compile:
-	dbt compile --profiles-dir ~/.dbt --target $(ENV)
+	dbt compile --profiles-dir . --target $(ENV)
 
 # Generate and serve docs
 docs:
-	dbt docs generate --profiles-dir ~/.dbt --target $(ENV)
+	dbt docs generate --profiles-dir . --target $(ENV)
 
 serve:
 	dbt docs serve
 
 # Debug configuration
 debug:
-	dbt debug --profiles-dir ~/.dbt --target $(ENV)
+	dbt debug --profiles-dir . --target $(ENV)
 
 # Clean generated artifacts
 clean:
@@ -75,11 +80,11 @@ clean:
 
 # Run specific model
 run-model:
-	dbt run --select $(MODEL) --profiles-dir ~/.dbt --target $(ENV)
+	dbt run --select $(MODEL) --profiles-dir . --target $(ENV)
 
 # Test specific model
 test-model:
-	dbt test --select $(MODEL) --profiles-dir ~/.dbt --target $(ENV)
+	dbt test --select $(MODEL) --profiles-dir . --target $(ENV)
 
 # Show model lineage
 lineage:
