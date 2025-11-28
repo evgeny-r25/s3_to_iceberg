@@ -292,8 +292,9 @@ class DuckDBProcessor:
             self.conn.execute(f"INSTALL {ext}")
             self.conn.execute(f"LOAD {ext}")
 
-        # Set S3 region
+        # Set S3 region and endpoint
         self.conn.execute("SET s3_region = 'eu-west-1'")
+        self.conn.execute("SET s3_endpoint = 's3.eu-west-1.amazonaws.com'")
         logger.debug("DuckDB extensions loaded")
 
     def _setup_s3_credentials(self) -> None:
@@ -303,7 +304,8 @@ class DuckDBProcessor:
             self.conn.execute("""
                 CREATE SECRET IF NOT EXISTS s3_secret (
                     TYPE s3,
-                    PROVIDER credential_chain
+                    PROVIDER credential_chain,
+                    REGION 'eu-west-1'
                 )
             """)
             logger.debug("S3 credentials configured using credential chain")
@@ -320,7 +322,8 @@ class DuckDBProcessor:
                         CREATE SECRET IF NOT EXISTS s3_secret (
                             TYPE s3,
                             KEY_ID '{access_key}',
-                            SECRET '{secret_key}'
+                            SECRET '{secret_key}',
+                            REGION 'eu-west-1'
                         )
                     """)
                     logger.debug("S3 credentials configured using environment variables")
@@ -349,7 +352,8 @@ class DuckDBProcessor:
                 bucket = parts[0]
                 key = parts[1]
 
-                # Try to read CSV.gz file with DuckDB
+                # Try to read CSV file with DuckDB
+                # Files have .gz extension but are plain CSV (not gzip compressed)
                 self.conn.execute(f"""
                     CREATE OR REPLACE TABLE temp_csv AS
                     SELECT
@@ -362,7 +366,8 @@ class DuckDBProcessor:
                         escape = '"',
                         filename = true,
                         union_by_name = true,
-                        ignore_errors = true
+                        ignore_errors = true,
+                        compression = 'none'
                     )
                 """)
 
@@ -396,14 +401,16 @@ class DuckDBProcessor:
                     escape = '"',
                     filename = true,
                     union_by_name = true,
-                    ignore_errors = true
+                    ignore_errors = true,
+                    compression = 'none'
                 )
             """)
 
             # Get all column names and create clean versions
             columns = self.conn.execute("DESCRIBE raw_events_temp").fetchall()
             select_clauses = []
-            for col_name, _ in columns:
+            for col_info in columns:
+                col_name = col_info[0]
                 # Remove curly braces from column names if present
                 clean_name = col_name.replace('{', '').replace('}', '')
                 if col_name != clean_name:

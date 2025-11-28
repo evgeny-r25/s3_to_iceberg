@@ -66,14 +66,6 @@ vars:
 # Configurations for different environments via targets
 # This will be expanded in profiles.yml for production/development/staging
 
-on-run-start: |
-  {%- if execute -%}
-    {% set env = var('environment') %}
-    {% do log("Starting dbt run for environment: " ~ env, info=true) %}
-  {%- endif -%}
+on-run-start: "{% if execute %}{% do log('=== S3 TO ICEBERG PIPELINE STARTED === Environment: ' ~ var('environment') ~ ' Start Time: ' ~ run_started_at.strftime('%Y-%m-%d %H:%M:%S') ~ ' Source: ' ~ var('s3_source_bucket') ~ ' Destination: ' ~ var('destination_s3_bucket_iceberg'), info=true) %}{% endif %}"
 
-on-run-end: |
-  {%- if execute -%}
-    {% set env = var('environment') %}
-    {% do log("Completed dbt run for environment: " ~ env, info=true) %}
-  {%- endif -%}
+on-run-end: "{% if execute %}{% do log('=== S3 TO ICEBERG PIPELINE COMPLETED === Environment: ' ~ var('environment') ~ ' Output: ' ~ var('destination_s3_bucket_iceberg') ~ ' Status: SUCCESS', info=true) %}{% endif %}"
